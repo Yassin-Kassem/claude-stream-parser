@@ -44,9 +44,7 @@ export async function* parseStream(
   const reader = stream.getReader();
   let buffer = "";
 
-  // Matches all blank-line separators the SSE split regex accepts:
-  // \n\n, \r\n\n, \n\r\n, \r\n\r\n
-  const BLANK_LINE = /\r?\n\r?\n$/;
+  const SEP = /\r?\n\r?\n/g;
 
   try {
     while (true) {
@@ -55,14 +53,22 @@ export async function* parseStream(
 
       buffer += decoder.decode(value, { stream: true });
 
-      // Split on double newlines — each block is one SSE event
-      const blocks = splitSSEBlocks(buffer);
+      // Find the end of the last complete separator in the raw buffer.
+      // Everything before it is complete SSE blocks; everything after is
+      // an incomplete block that stays in the buffer (preserving whitespace).
+      SEP.lastIndex = 0;
+      let lastSepEnd = 0;
+      let match;
+      while ((match = SEP.exec(buffer)) !== null) {
+        lastSepEnd = match.index + match[0].length;
+      }
 
-      // If the buffer ends with a blank-line separator every block is complete.
-      // Otherwise the last element may be an incomplete block — keep it buffered.
-      buffer = BLANK_LINE.test(buffer) ? "" : (blocks.pop() ?? "");
+      if (lastSepEnd === 0) continue; // no complete events yet
 
-      for (const block of blocks) {
+      const complete = buffer.slice(0, lastSepEnd);
+      buffer = buffer.slice(lastSepEnd);
+
+      for (const block of splitSSEBlocks(complete)) {
         const event = parseSSEBlock(block);
         if (!event) continue;
 

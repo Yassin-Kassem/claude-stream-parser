@@ -231,6 +231,83 @@ describe("parseStream", () => {
       }
     }).rejects.toThrow(ClaudeStreamError);
   });
+
+  it("handles chunks split mid-event (chunk boundary inside data line)", async () => {
+    // Simulate the network splitting one SSE event across two chunks
+    const encoder = new TextEncoder();
+    const line = 'event: ping\ndata: {"type":"ping"}\n\n';
+    const half = Math.floor(line.length / 2);
+    const chunk1 = encoder.encode(line.slice(0, half));
+    const chunk2 = encoder.encode(line.slice(half));
+
+    let chunkIndex = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (chunkIndex === 0) controller.enqueue(chunk1);
+        else if (chunkIndex === 1) controller.enqueue(chunk2);
+        else controller.close();
+        chunkIndex++;
+      },
+    });
+
+    const events: ClaudeStreamEvent[] = [];
+    for await (const e of parseStream(stream)) events.push(e);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type).toBe("ping");
+  });
+
+  it("handles mixed line endings (\\n\\r\\n separator)", async () => {
+    // \n\r\n is matched by the split regex but was missed by the old endsWith check
+    const encoder = new TextEncoder();
+    const raw = 'event: ping\ndata: {"type":"ping"}\n\r\nevent: ping\ndata: {"type":"ping"}\n\r\n';
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(raw));
+        controller.close();
+      },
+    });
+
+    const events: ClaudeStreamEvent[] = [];
+    for await (const e of parseStream(stream)) events.push(e);
+    expect(events).toHaveLength(2);
+  });
+
+  it("handles multi-byte UTF-8 characters (emoji) split across chunk boundaries", async () => {
+    // 😀 is U+1F600 → 4 bytes: F0 9F 98 80
+    const emoji = "😀";
+    const payload = JSON.stringify({
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text: emoji },
+    });
+    const full = `event: content_block_delta\ndata: ${payload}\n\n`;
+    const bytes = new TextEncoder().encode(full);
+
+    // Split in the middle of the emoji bytes
+    const splitAt = full.indexOf(emoji);
+    const chunk1 = bytes.slice(0, splitAt + 2); // cuts emoji mid-sequence
+    const chunk2 = bytes.slice(splitAt + 2);
+
+    let chunkIndex = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (chunkIndex === 0) controller.enqueue(chunk1);
+        else if (chunkIndex === 1) controller.enqueue(chunk2);
+        else controller.close();
+        chunkIndex++;
+      },
+    });
+
+    const events: ClaudeStreamEvent[] = [];
+    for await (const e of parseStream(stream)) events.push(e);
+    expect(events).toHaveLength(1);
+    const e = events[0];
+    if (e?.type === "content_block_delta" && e.delta.type === "text_delta") {
+      expect(e.delta.text).toBe(emoji);
+    } else {
+      throw new Error("Expected a text_delta event");
+    }
+  });
 });
 
 // ─── streamText ───────────────────────────────────────────────────────────────

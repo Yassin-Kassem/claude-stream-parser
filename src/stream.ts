@@ -44,6 +44,10 @@ export async function* parseStream(
   const reader = stream.getReader();
   let buffer = "";
 
+  // Matches all blank-line separators the SSE split regex accepts:
+  // \n\n, \r\n\n, \n\r\n, \r\n\r\n
+  const BLANK_LINE = /\r?\n\r?\n$/;
+
   try {
     while (true) {
       const { done, value } = await reader.read();
@@ -54,11 +58,9 @@ export async function* parseStream(
       // Split on double newlines — each block is one SSE event
       const blocks = splitSSEBlocks(buffer);
 
-      // The last element might be an incomplete block, keep it in the buffer
-      const endsWithBlankLine =
-        buffer.endsWith("\n\n") || buffer.endsWith("\r\n\r\n");
-
-      buffer = endsWithBlankLine ? "" : (blocks.pop() ?? "");
+      // If the buffer ends with a blank-line separator every block is complete.
+      // Otherwise the last element may be an incomplete block — keep it buffered.
+      buffer = BLANK_LINE.test(buffer) ? "" : (blocks.pop() ?? "");
 
       for (const block of blocks) {
         const event = parseSSEBlock(block);
@@ -72,6 +74,9 @@ export async function* parseStream(
       }
     }
 
+    // Flush any bytes held inside the TextDecoder for incomplete UTF-8 sequences.
+    buffer += decoder.decode();
+
     // Flush remaining buffer
     if (buffer.trim()) {
       const event = parseSSEBlock(buffer);
@@ -81,7 +86,11 @@ export async function* parseStream(
       }
     }
   } finally {
-    reader.releaseLock();
+    try {
+      reader.releaseLock();
+    } catch {
+      // Stream may already be closed/cancelled — don't mask the original error.
+    }
   }
 }
 
